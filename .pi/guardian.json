@@ -1,0 +1,13 @@
+{
+  "binary": "guardian",
+  "globalArgs": [],
+  "createArgs": [
+    "--gvisor-overlay2=none",
+    "--mount",
+    "type=bind,source=$(pwd),destination=/workspace",
+    "--mount",
+    "type=bind,source=$(pwd)/.git,destination=/workspace/.git,ro=true"
+  ],
+  "cleanup": "ask",
+  "allow_no_sandbox": false
+}

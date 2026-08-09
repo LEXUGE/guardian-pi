@@ -1,0 +1,59 @@
+ARG RUST_VERSION=1.97.1
+ARG NVM_VERSION=0.40.6
+ARG NODE_VERSION=22.23.2
+ARG TYPESCRIPT_VERSION=latest
+
+FROM docker.io/nixos/nix:2.35.1@sha256:377d4887aca98f0dfa12971c1ea6d6a625a435d8b610d4c95a436843da6fbfd1 AS nix
+FROM docker.io/astral/uv:latest AS uv
+FROM docker.io/debian:trixie-slim
+
+ARG RUST_VERSION
+ARG NVM_VERSION
+ARG NODE_VERSION
+ARG TYPESCRIPT_VERSION
+
+COPY --from=uv /uv /uvx /bin/
+COPY --from=nix /nix /nix
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    coreutils \
+    socat \
+    ripgrep \
+    xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /etc/nix \
+ && printf '%s\n' \
+      'experimental-features = nix-command flakes' \
+      'sandbox = false' \
+      'build-users-group =' \
+      > /etc/nix/nix.conf
+
+ENV NIX_REMOTE=local \
+    NIX_SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/nix/var/nix/profiles/default/bin:$PATH
+
+RUN nix --version \
+ && nix store ping --store local
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --no-modify-path --default-toolchain "${RUST_VERSION}"
+
+ENV NVM_DIR=/usr/local/nvm
+
+RUN mkdir -p "$NVM_DIR" \
+ && curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh" \
+    | bash \
+ && . "$NVM_DIR/nvm.sh" \
+ && nvm install "$NODE_VERSION" \
+ && nvm alias default "$NODE_VERSION" \
+ && npm install --global "typescript@${TYPESCRIPT_VERSION}" \
+ && npm cache clean --force
+
+ENV PATH="$NVM_DIR/versions/node/v${NODE_VERSION}/bin:$PATH"
