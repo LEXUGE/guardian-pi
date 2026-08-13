@@ -21,6 +21,11 @@ export interface ExecutionResult {
   exitCode: number | null;
 }
 
+export interface GuardianOwner {
+  child: ChildProcess;
+  completed: Promise<ExecutionResult>;
+}
+
 export interface GuardianClientConfig {
   binary: string;
   logFile: string;
@@ -66,18 +71,31 @@ export class GuardianClient {
     return containers as GuardianContainer[];
   }
 
-  start(sandboxId: string): ChildProcess {
-    return spawn(this.config.binary, [
+  start(sandboxId: string): GuardianOwner {
+    const child = spawn(this.config.binary, [
       "--log-file",
       this.config.logFile,
       ...this.config.globalArgs,
       "start",
       sandboxId,
-    ], { stdio: "ignore" });
-  }
-
-  async stop(sandboxId: string): Promise<ExecutionResult> {
-    return this.run(["stop", sandboxId], {});
+    ], { stdio: ["ignore", "ignore", "pipe"] });
+    const completed = new Promise<ExecutionResult>((resolve, reject) => {
+      const stderr: Buffer[] = [];
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        callback();
+      };
+      child.stderr?.on("data", (data: Buffer) => stderr.push(data));
+      child.once("error", (error) => finish(() => reject(error)));
+      child.once("close", (exitCode) => finish(() => resolve({
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.concat(stderr),
+        exitCode,
+      })));
+    });
+    return { child, completed };
   }
 
   async exec(sandboxId: string, options: ExecutionOptions): Promise<ExecutionResult> {

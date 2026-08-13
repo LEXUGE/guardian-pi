@@ -21,7 +21,7 @@ export interface ToolBackend {
 
 export interface Sandbox extends ToolBackend {
   readonly id: string | null;
-  start(): void;
+  start(): Promise<Error | undefined>;
   stop(): Promise<Error | undefined>;
   activateHook?(pi: ExtensionAPI): void;
   deactivateHook?(pi: ExtensionAPI): void;

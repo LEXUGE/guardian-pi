@@ -31,9 +31,6 @@ export async function chooseSandbox(
   } else if (choice === "Resume") {
     const selected = await selectExistingSandbox(client, ctx);
     if (selected === undefined) return;
-    if ((await client.status(selected)) === "running") {
-      throw new Error(`Guardian sandbox ${selected} is already running`);
-    }
     next = new GuardianSandbox(client, selected);
   } else {
     const image = await ctx.ui.editor("Guardian image", config.image);

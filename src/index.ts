@@ -38,7 +38,8 @@ export default function guardianExtension(pi: ExtensionAPI): void {
       const warning = await previous.stop();
       if (warning) ctx.ui.notify(warning.message, "warning");
     }
-    next?.start();
+    const warning = await next?.start();
+    if (warning) ctx.ui.notify(warning.message, "warning");
     router.select(next, pi);
     setStatus(router, ctx);
   };
@@ -110,9 +111,19 @@ export async function changeSandbox(
     const warning = await previous.stop();
     if (warning) ctx.ui.notify(warning.message, "warning");
   }
-  if (removePrevious && previous?.id) await client.remove(previous.id);
+  if (removePrevious && previous?.id) {
+    if ((await client.status(previous.id)) === "running") {
+      ctx.ui.notify(
+        `Guardian sandbox ${previous.id} is still owned by another process and will not be removed`,
+        "warning",
+      );
+    } else {
+      await client.remove(previous.id);
+    }
+  }
 
-  next.start();
+  const warning = await next.start();
+  if (warning) ctx.ui.notify(warning.message, "warning");
   pi.appendEntry<SandboxEntry>(SANDBOX_ENTRY, {
     piSessionId: ctx.sessionManager.getSessionId(),
     sandboxId: next.id,

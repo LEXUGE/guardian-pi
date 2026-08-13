@@ -1,4 +1,3 @@
-import type { ChildProcess } from "node:child_process";
 import type {
   BashOperations,
   EditOperations,
@@ -23,10 +22,12 @@ import {
   GuardianClient,
   type ExecutionOptions,
   type ExecutionResult,
+  type GuardianOwner,
 } from "./guardian.ts";
 
 const GUARDIAN_CWD = "/workspace";
 const HOST_ONLY_TOOLS = new Set(["ls", "find", "grep"]);
+const START_POLL_INTERVAL_MS = 25;
 
 function quoteShellArgument(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -47,31 +48,122 @@ export class GuardianSandbox implements Sandbox {
   readonly id: string;
   private readonly client: GuardianClient;
   private readonly suspendedTools = new Set<string>();
-  private startChild?: ChildProcess;
+  private ownership: "inactive" | "owned" | "borrowed" = "inactive";
+  private owner?: GuardianOwner;
+  private starting?: Promise<Error | undefined>;
+  private stopping?: Promise<Error | undefined>;
 
   constructor(client: GuardianClient, id: string) {
     this.client = client;
     this.id = id;
   }
 
-  start(): void {
-    const child = this.client.start(this.id);
-    this.startChild = child;
-    const clear = (): void => {
-      if (this.startChild === child) this.startChild = undefined;
-    };
-    child.once("error", clear);
-    child.once("close", clear);
+  async start(): Promise<Error | undefined> {
+    if (this.stopping) await this.stopping;
+    if (this.starting) return this.starting;
+    if (this.ownership !== "inactive") return undefined;
+
+    const operation = this.startOnce();
+    this.starting = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.starting === operation) this.starting = undefined;
+    }
   }
 
   async stop(): Promise<Error | undefined> {
-    this.startChild = undefined;
+    if (this.stopping) return this.stopping;
+    const operation = this.stopOnce();
+    this.stopping = operation;
     try {
-      const result = await this.client.stop(this.id);
+      return await operation;
+    } finally {
+      if (this.stopping === operation) this.stopping = undefined;
+    }
+  }
+
+  private async startOnce(): Promise<Error | undefined> {
+    if ((await this.client.status(this.id)) === "running") {
+      this.ownership = "borrowed";
+      return new Error(
+        `Guardian sandbox ${this.id} is already running; using its existing owner. ` +
+        "It will not be stopped when this Pi session exits.",
+      );
+    }
+
+    const owner = this.client.start(this.id);
+    this.owner = owner;
+    void owner.completed.then(
+      () => this.ownerExited(owner),
+      () => this.ownerExited(owner),
+    );
+
+    try {
+      await this.waitUntilRunning(owner);
+      if (this.owner !== owner) throw new Error(`Guardian sandbox ${this.id} owner exited during startup`);
+      this.ownership = "owned";
+      return undefined;
+    } catch (error) {
+      if (this.owner === owner) owner.child.kill("SIGTERM");
+      try {
+        await owner.completed;
+      } catch {}
+      if (this.owner === owner) this.owner = undefined;
+      this.ownership = "inactive";
+      throw error;
+    }
+  }
+
+  private async stopOnce(): Promise<Error | undefined> {
+    if (this.starting) {
+      try {
+        await this.starting;
+      } catch (error) {
+        return error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    if (this.ownership === "borrowed") {
+      this.ownership = "inactive";
+      return undefined;
+    }
+
+    const owner = this.owner;
+    if (!owner) {
+      this.ownership = "inactive";
+      return undefined;
+    }
+
+    owner.child.kill("SIGTERM");
+    try {
+      const result = await owner.completed;
       return result.exitCode === 0 ? undefined : failure(`Stop Guardian sandbox ${this.id}`, result);
     } catch (error) {
       return error instanceof Error ? error : new Error(String(error));
+    } finally {
+      if (this.owner === owner) this.owner = undefined;
+      this.ownership = "inactive";
     }
+  }
+
+  private async waitUntilRunning(owner: GuardianOwner): Promise<void> {
+    const ownerExit = owner.completed.then((result) => {
+      throw failure(`Start Guardian sandbox ${this.id}`, result);
+    });
+    while (true) {
+      const status = await Promise.race([this.client.status(this.id), ownerExit]);
+      if (status === "running") return;
+      await Promise.race([
+        new Promise((resolve) => setTimeout(resolve, START_POLL_INTERVAL_MS)),
+        ownerExit,
+      ]);
+    }
+  }
+
+  private ownerExited(owner: GuardianOwner): void {
+    if (this.owner !== owner) return;
+    this.owner = undefined;
+    this.ownership = "inactive";
   }
 
   activateHook(pi: ExtensionAPI): void {
@@ -189,7 +281,9 @@ export class GuardianSandbox implements Sandbox {
 export class DirectSandbox implements Sandbox {
   readonly id = null;
 
-  start(): void {}
+  async start(): Promise<undefined> {
+    return undefined;
+  }
 
   async stop(): Promise<undefined> {
     return undefined;

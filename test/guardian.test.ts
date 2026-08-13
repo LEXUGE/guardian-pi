@@ -73,33 +73,51 @@ done
 case "$command" in
   create) printf '${SANDBOX_ID}\\n' ;;
   list) printf '%s\\n' '[{"Names":["devbox-guardian"],"Image":"localhost/pi-guardian:latest","Id":"dac386fd7d534af70545f0e8a3cc2f65fba60dc38c49773ae739c65a9db7f083","Labels":{"io.guardian.sandbox.id":"${RESUMED_SANDBOX_ID}","io.guardian.sandbox.host-uds":"open"}}]' ;;
-  status) printf 'stopped\\n' ;;
-  start)
-    printf 'start:%s\\n' "$last" >> "$state/events"
-    printf '%s\\n' "$$" > "$state/start.pid"
-    trap 'rm -f "$state/start.pid"; exit 0' TERM INT
-    while :; do sleep 1; done
-    ;;
-  stop)
-    printf 'stop-begin:%s\\n' "$last" >> "$state/events"
-    touch "$state/stop-entered"
-    while [ -f "$state/block-stop" ]; do sleep 0.01; done
-    if [ -f "$state/start.pid" ]; then
-      kill "$(cat "$state/start.pid")" 2>/dev/null || true
+  status)
+    if [ -f "$state/start.pid" ] && kill -0 "$(cat "$state/start.pid")" 2>/dev/null; then
+      printf 'running\\n'
+    else
       rm -f "$state/start.pid"
+      printf 'stopped\\n'
     fi
-    printf 'stop-end:%s\\n' "$last" >> "$state/events"
-    if [ -f "$state/fail-stop" ]; then
-      printf 'stop failed\\n' >&2
+    ;;
+  start)
+    if [ -f "$state/fail-start" ]; then
+      printf 'start failed\\n' >&2
       exit 1
     fi
+    if [ -f "$state/start.pid" ] && kill -0 "$(cat "$state/start.pid")" 2>/dev/null; then
+      printf 'already running\\n' >&2
+      exit 1
+    fi
+    printf 'start:%s\\n' "$last" >> "$state/events"
+    printf '%s\\n' "$$" > "$state/start.pid"
+    stop_owner() {
+      printf 'stop-begin:%s\\n' "$last" >> "$state/events"
+      touch "$state/stop-entered"
+      while [ -f "$state/block-stop" ]; do sleep 0.01; done
+      rm -f "$state/start.pid"
+      printf 'stop-end:%s\\n' "$last" >> "$state/events"
+      if [ -f "$state/fail-stop" ]; then
+        printf 'stop failed\\n' >&2
+        exit 1
+      fi
+      exit 0
+    }
+    trap stop_owner TERM INT
+    while :; do sleep 0.01; done
     ;;
   exec) exec /bin/sh ;;
   remove)
+    if [ -f "$state/start.pid" ] && kill -0 "$(cat "$state/start.pid")" 2>/dev/null; then
+      printf 'sandbox is running\\n' >&2
+      exit 1
+    fi
     if [ -f "$state/fail-remove" ]; then
       printf 'remove failed\n' >&2
       exit 1
     fi
+    printf 'remove:%s\\n' "$last" >> "$state/events"
     ;;
   *) printf 'unknown command\\n' >&2; exit 125 ;;
 esac
@@ -319,6 +337,90 @@ test("session shutdown awaits the selected sandbox stop", async (context) => {
   await waitForEvent(fake.directory, `stop-end:${SANDBOX_ID}`);
 });
 
+test("an already-running sandbox is borrowed and not stopped", async (context) => {
+  const fake = await createFakeGuardian();
+  context.after(() => cleanupFakeGuardian(fake));
+  const client = createTestClient(fake);
+  const owner = client.start(SANDBOX_ID);
+  context.after(async () => {
+    owner.child.kill("SIGTERM");
+    await owner.completed;
+  });
+  await waitForEvent(fake.directory, `start:${SANDBOX_ID}`);
+
+  const sandbox = new GuardianSandbox(client, SANDBOX_ID);
+  const warning = await sandbox.start();
+  assert.match(warning?.message ?? "", /already running.*existing owner/s);
+
+  assert.equal(await sandbox.stop(), undefined);
+  assert.equal(await client.status(SANDBOX_ID), "running");
+  assert.equal((await readEvents(fake.directory)).includes(`stop-begin:${SANDBOX_ID}`), false);
+
+  owner.child.kill("SIGTERM");
+  assert.equal((await owner.completed).exitCode, 0);
+});
+
+test("changing away from a borrowed sandbox does not remove its running owner", async (context) => {
+  const fake = await createFakeGuardian();
+  context.after(() => cleanupFakeGuardian(fake));
+  const client = createTestClient(fake);
+  const owner = client.start(SANDBOX_ID);
+  context.after(async () => {
+    owner.child.kill("SIGTERM");
+    await owner.completed;
+  });
+  await waitForEvent(fake.directory, `start:${SANDBOX_ID}`);
+
+  const previous = new GuardianSandbox(client, SANDBOX_ID);
+  await previous.start();
+  const router = new Router();
+  const { pi } = activeToolApi();
+  router.select(previous, pi);
+  const warnings: string[] = [];
+  const ctx = {
+    ui: { notify: (message: string) => warnings.push(message) },
+    sessionManager: { getSessionId: () => "pi-session" },
+  } as unknown as ExtensionContext;
+  const config = {
+    binary: fake.binary,
+    image: "demo-image",
+    globalArgs: [],
+    createArgs: [],
+    logFile: join(fake.directory, "guardian.jsonl"),
+    cleanup: "remove" as const,
+    allowNoSandbox: true,
+  };
+
+  await changeSandbox(pi, config, client, router, new DirectSandbox(), ctx);
+  assert.equal(await client.status(SANDBOX_ID), "running");
+  assert.equal((await readEvents(fake.directory)).some((event) => event.startsWith("remove:")), false);
+  assert.match(warnings[0] ?? "", /still owned by another process.*not be removed/);
+
+  owner.child.kill("SIGTERM");
+  assert.equal((await owner.completed).exitCode, 0);
+});
+
+test("stopping an owned sandbox is idempotent", async (context) => {
+  const fake = await createFakeGuardian();
+  context.after(() => cleanupFakeGuardian(fake));
+  const sandbox = new GuardianSandbox(createTestClient(fake), SANDBOX_ID);
+  await sandbox.start();
+
+  assert.deepEqual(await Promise.all([sandbox.stop(), sandbox.stop()]), [undefined, undefined]);
+  const events = await readEvents(fake.directory);
+  assert.equal(events.filter((event) => event === `stop-begin:${SANDBOX_ID}`).length, 1);
+});
+
+test("a Guardian owner that exits during startup prevents sandbox selection", async (context) => {
+  const fake = await createFakeGuardian();
+  context.after(() => cleanupFakeGuardian(fake));
+  await writeFile(join(fake.directory, "fail-start"), "");
+  const sandbox = new GuardianSandbox(createTestClient(fake), SANDBOX_ID);
+
+  await assert.rejects(sandbox.start(), /Start Guardian sandbox.*start failed/);
+  assert.equal(await createTestClient(fake).status(SANDBOX_ID), "stopped");
+});
+
 test("selection awaits the previous stop before starting the next sandbox", async (context) => {
   const fake = await createFakeGuardian();
   context.after(() => cleanupFakeGuardian(fake));
@@ -341,7 +443,7 @@ test("selection awaits the previous stop before starting the next sandbox", asyn
     allowNoSandbox: true,
   };
 
-  previous.start();
+  await previous.start();
   router.select(previous, pi);
   await waitForEvent(fake.directory, `start:${SANDBOX_ID}`);
   await writeFile(join(fake.directory, "block-stop"), "");
@@ -355,6 +457,39 @@ test("selection awaits the previous stop before starting the next sandbox", asyn
   await waitForEvent(fake.directory, `start:${RESUMED_SANDBOX_ID}`);
   const events = await readEvents(fake.directory);
   assert.ok(events.indexOf(`stop-end:${SANDBOX_ID}`) < events.indexOf(`start:${RESUMED_SANDBOX_ID}`));
+  await next.stop();
+});
+
+test("reselecting the same sandbox stops and starts a fresh owner", async (context) => {
+  const fake = await createFakeGuardian();
+  context.after(() => cleanupFakeGuardian(fake));
+  const client = createTestClient(fake);
+  const router = new Router();
+  const previous = new GuardianSandbox(client, SANDBOX_ID);
+  const next = new GuardianSandbox(client, SANDBOX_ID);
+  const { pi } = activeToolApi();
+  const ctx = {
+    ui: { notify: () => {} },
+    sessionManager: { getSessionId: () => "pi-session" },
+  } as unknown as ExtensionContext;
+  const config = {
+    binary: fake.binary,
+    image: "demo-image",
+    globalArgs: [],
+    createArgs: [],
+    logFile: join(fake.directory, "guardian.jsonl"),
+    cleanup: "remove" as const,
+    allowNoSandbox: true,
+  };
+
+  await previous.start();
+  router.select(previous, pi);
+  await changeSandbox(pi, config, client, router, next, ctx);
+
+  const events = await readEvents(fake.directory);
+  assert.equal(events.filter((event) => event === `start:${SANDBOX_ID}`).length, 2);
+  assert.equal(events.filter((event) => event === `stop-end:${SANDBOX_ID}`).length, 1);
+  assert.equal(events.some((event) => event.startsWith("remove:")), false);
   await next.stop();
 });
 
@@ -386,7 +521,7 @@ test("a failed stop warns and does not prevent selecting the next sandbox", asyn
     allowNoSandbox: true,
   };
 
-  previous.start();
+  await previous.start();
   router.select(previous, pi);
   await waitForEvent(fake.directory, `start:${SANDBOX_ID}`);
   await writeFile(join(fake.directory, "fail-stop"), "");
@@ -448,7 +583,7 @@ test("GuardianClient creates, checks, and attaches to a sandbox", async (context
 test("GuardianSandbox implements read, write, edit, and bash", async (context) => {
   const fake = await createFakeGuardian();
   const sandbox = new GuardianSandbox(createTestClient(fake), SANDBOX_ID);
-  sandbox.start();
+  await sandbox.start();
   context.after(async () => {
     await sandbox.stop();
     await rm(fake.directory, { force: true, recursive: true });
