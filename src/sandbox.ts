@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process";
 import type {
   BashOperations,
   EditOperations,
@@ -46,10 +47,31 @@ export class GuardianSandbox implements Sandbox {
   readonly id: string;
   private readonly client: GuardianClient;
   private readonly suspendedTools = new Set<string>();
+  private startChild?: ChildProcess;
 
   constructor(client: GuardianClient, id: string) {
     this.client = client;
     this.id = id;
+  }
+
+  start(): void {
+    const child = this.client.start(this.id);
+    this.startChild = child;
+    const clear = (): void => {
+      if (this.startChild === child) this.startChild = undefined;
+    };
+    child.once("error", clear);
+    child.once("close", clear);
+  }
+
+  async stop(): Promise<Error | undefined> {
+    this.startChild = undefined;
+    try {
+      const result = await this.client.stop(this.id);
+      return result.exitCode === 0 ? undefined : failure(`Stop Guardian sandbox ${this.id}`, result);
+    } catch (error) {
+      return error instanceof Error ? error : new Error(String(error));
+    }
   }
 
   activateHook(pi: ExtensionAPI): void {
@@ -94,7 +116,7 @@ export class GuardianSandbox implements Sandbox {
     script: string,
     options?: Omit<ExecutionOptions, "input">,
   ): Promise<ExecutionResult> {
-    return this.client.start(this.id, {
+    return this.client.exec(this.id, {
       input: Buffer.from(`${script}\n`),
       ...options,
     });
@@ -166,6 +188,12 @@ export class GuardianSandbox implements Sandbox {
 
 export class DirectSandbox implements Sandbox {
   readonly id = null;
+
+  start(): void {}
+
+  async stop(): Promise<undefined> {
+    return undefined;
+  }
 
   bash: BashExecutor = async (id, params, signal, onUpdate, ctx) => {
     return createBashToolDefinition(ctx.cwd).execute(id, params, signal, onUpdate, ctx);

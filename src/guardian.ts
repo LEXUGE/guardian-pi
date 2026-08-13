@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 export interface GuardianContainer {
   Names: string[];
@@ -29,7 +29,7 @@ export interface GuardianClientConfig {
 
 function validateCreateArgs(args: string[]): void {
   if (args.some((item) => item === "--" || item === "--tty" || item.startsWith("--tty="))) {
-    throw new Error("Guardian create arguments cannot contain -- or --tty; the extension requires /bin/sh -s without a TTY");
+    throw new Error("Guardian create arguments cannot contain -- or --tty");
   }
 }
 
@@ -42,7 +42,7 @@ export class GuardianClient {
 
   async create(image: string, createArgs: string[], signal?: AbortSignal): Promise<string> {
     validateCreateArgs(createArgs);
-    const args = ["create", ...createArgs, image, "--", "/bin/sh", "-s"];
+    const args = ["create", ...createArgs, image];
     const result = await this.runChecked(args, "create sandbox", signal);
 
     const id = result.stdout.toString("utf8").trim();
@@ -66,8 +66,22 @@ export class GuardianClient {
     return containers as GuardianContainer[];
   }
 
-  async start(sandboxId: string, options: ExecutionOptions): Promise<ExecutionResult> {
-    return this.run(["start", sandboxId], options);
+  start(sandboxId: string): ChildProcess {
+    return spawn(this.config.binary, [
+      "--log-file",
+      this.config.logFile,
+      ...this.config.globalArgs,
+      "start",
+      sandboxId,
+    ], { stdio: "ignore" });
+  }
+
+  async stop(sandboxId: string): Promise<ExecutionResult> {
+    return this.run(["stop", sandboxId], {});
+  }
+
+  async exec(sandboxId: string, options: ExecutionOptions): Promise<ExecutionResult> {
+    return this.run(["exec", sandboxId, "/bin/sh", "-s"], options);
   }
 
   async remove(sandboxId: string, signal?: AbortSignal): Promise<void> {

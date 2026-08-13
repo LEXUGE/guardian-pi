@@ -24,7 +24,7 @@ export default function guardianExtension(pi: ExtensionAPI): void {
     direct = new DirectSandbox();
   };
 
-  const restoreSandbox = (ctx: ExtensionContext): void => {
+  const restoreSandbox = async (ctx: ExtensionContext): Promise<void> => {
     initialize(ctx.cwd);
     const entry = findSandboxEntry(ctx);
     const next = typeof entry?.sandboxId === "string"
@@ -32,6 +32,13 @@ export default function guardianExtension(pi: ExtensionAPI): void {
       : config!.allowNoSandbox
       ? direct!
       : undefined;
+    const previous = router.selected;
+    if (previous) {
+      router.select(undefined, pi);
+      const warning = await previous.stop();
+      if (warning) ctx.ui.notify(warning.message, "warning");
+    }
+    next?.start();
     router.select(next, pi);
     setStatus(router, ctx);
   };
@@ -58,21 +65,27 @@ export default function guardianExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     try {
-      restoreSandbox(ctx);
+      await restoreSandbox(ctx);
     } catch (error) {
       notifyError(ctx, error);
     }
   });
-  pi.on("session_tree", (_event, ctx) => {
+  pi.on("session_tree", async (_event, ctx) => {
     try {
-      restoreSandbox(ctx);
+      await restoreSandbox(ctx);
     } catch (error) {
       notifyError(ctx, error);
     }
   });
-  pi.on("session_shutdown", () => router.select(undefined, pi));
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const previous = router.selected;
+    if (!previous) return;
+    router.select(undefined, pi);
+    const warning = await previous.stop();
+    if (warning) ctx.ui.notify(warning.message, "warning");
+  });
 }
 
 export async function changeSandbox(
@@ -84,14 +97,22 @@ export async function changeSandbox(
   ctx: ExtensionContext,
 ): Promise<void> {
   const previous = router.selected;
+  let removePrevious = false;
   if (previous?.id && previous.id !== next.id) {
-    let remove = config.cleanup === "remove";
+    removePrevious = config.cleanup === "remove";
     if (config.cleanup === "ask") {
-      remove = await ctx.ui.confirm("Remove Guardian sandbox?", previous.id);
+      removePrevious = await ctx.ui.confirm("Remove Guardian sandbox?", previous.id);
     }
-    if (remove) await client.remove(previous.id);
   }
 
+  if (previous) {
+    router.select(undefined, pi);
+    const warning = await previous.stop();
+    if (warning) ctx.ui.notify(warning.message, "warning");
+  }
+  if (removePrevious && previous?.id) await client.remove(previous.id);
+
+  next.start();
   pi.appendEntry<SandboxEntry>(SANDBOX_ENTRY, {
     piSessionId: ctx.sessionManager.getSessionId(),
     sandboxId: next.id,

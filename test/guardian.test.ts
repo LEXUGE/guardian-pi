@@ -14,7 +14,6 @@ import { GuardianClient } from "../src/guardian.ts";
 import guardianExtension, { changeSandbox } from "../src/index.ts";
 import { Router } from "../src/router.ts";
 import { DirectSandbox, GuardianSandbox } from "../src/sandbox.ts";
-import { chooseSandbox } from "../src/sandbox-command.ts";
 import { findSandboxEntry, SANDBOX_ENTRY } from "../src/sandbox-state.ts";
 
 const SANDBOX_ID = "11111111-1111-4111-8111-111111111111";
@@ -58,12 +57,16 @@ async function createFakeGuardian(): Promise<{ directory: string; binary: string
   await writeFile(
     binary,
     `#!/bin/sh
+state=$(dirname "$0")
 for argument in "$@"; do
+  last=$argument
   case "$argument" in
     create) command=create ;;
     list) command=list ;;
     status) command=status ;;
     start) command=start ;;
+    stop) command=stop ;;
+    exec) command=exec ;;
     remove) command=remove ;;
   esac
 done
@@ -71,9 +74,29 @@ case "$command" in
   create) printf '${SANDBOX_ID}\\n' ;;
   list) printf '%s\\n' '[{"Names":["devbox-guardian"],"Image":"localhost/pi-guardian:latest","Id":"dac386fd7d534af70545f0e8a3cc2f65fba60dc38c49773ae739c65a9db7f083","Labels":{"io.guardian.sandbox.id":"${RESUMED_SANDBOX_ID}","io.guardian.sandbox.host-uds":"open"}}]' ;;
   status) printf 'stopped\\n' ;;
-  start) exec /bin/sh ;;
+  start)
+    printf 'start:%s\\n' "$last" >> "$state/events"
+    printf '%s\\n' "$$" > "$state/start.pid"
+    trap 'rm -f "$state/start.pid"; exit 0' TERM INT
+    while :; do sleep 1; done
+    ;;
+  stop)
+    printf 'stop-begin:%s\\n' "$last" >> "$state/events"
+    touch "$state/stop-entered"
+    while [ -f "$state/block-stop" ]; do sleep 0.01; done
+    if [ -f "$state/start.pid" ]; then
+      kill "$(cat "$state/start.pid")" 2>/dev/null || true
+      rm -f "$state/start.pid"
+    fi
+    printf 'stop-end:%s\\n' "$last" >> "$state/events"
+    if [ -f "$state/fail-stop" ]; then
+      printf 'stop failed\\n' >&2
+      exit 1
+    fi
+    ;;
+  exec) exec /bin/sh ;;
   remove)
-    if [ -f "$(dirname "$0")/fail-remove" ]; then
+    if [ -f "$state/fail-remove" ]; then
       printf 'remove failed\n' >&2
       exit 1
     fi
@@ -94,6 +117,30 @@ function createTestClient(fake: { directory: string; binary: string }): Guardian
   });
 }
 
+async function cleanupFakeGuardian(fake: { directory: string }): Promise<void> {
+  try {
+    const pid = Number.parseInt(await readFile(join(fake.directory, "start.pid"), "utf8"), 10);
+    process.kill(pid, "SIGTERM");
+  } catch {}
+  await rm(fake.directory, { force: true, recursive: true });
+}
+
+async function readEvents(directory: string): Promise<string[]> {
+  try {
+    return (await readFile(join(directory, "events"), "utf8")).trim().split("\n");
+  } catch {
+    return [];
+  }
+}
+
+async function waitForEvent(directory: string, event: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if ((await readEvents(directory)).includes(event)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for event: ${event}`);
+}
+
 function toolContext(cwd: string): ExtensionContext {
   return {
     cwd,
@@ -111,6 +158,7 @@ function activeToolApi(initial: string[] = ["bash", "read", "write", "edit", "ls
   let active = initial;
   return {
     pi: {
+      appendEntry: () => {},
       getActiveTools: () => active,
       setActiveTools: (next: string[]) => {
         active = next;
@@ -130,7 +178,7 @@ test("generic registration registers the four routed tools", () => {
   registerTools(pi, backend);
 
   assert.deepEqual(definitions.map((definition) => definition.name), ["bash", "read", "write", "edit"]);
-  assert.ok(definitions.every((definition) => definition.executionMode === "sequential"));
+  assert.ok(definitions.every((definition) => definition.executionMode === undefined));
   assert.ok(definitions.every((definition) => definition.label.endsWith("(Guardian)")));
 });
 
@@ -156,7 +204,7 @@ test("Router delegates to the selected sandbox and runs its hooks", async (conte
 
 test("Guardian extension restores host-only tools when leaving a sandbox branch", async (context) => {
   const fake = await createFakeGuardian();
-  context.after(() => rm(fake.directory, { force: true, recursive: true }));
+  context.after(() => cleanupFakeGuardian(fake));
   await mkdir(join(fake.directory, ".pi"));
   await writeFile(join(fake.directory, ".pi", "guardian.json"), JSON.stringify({
     binary: fake.binary,
@@ -211,100 +259,146 @@ test("Guardian extension restores host-only tools when leaving a sandbox branch"
   assert.deepEqual(activeTools, ["bash", "read", "write", "edit", "ls", "find", "grep"]);
 });
 
-test("sandbox selection cleans up only after changing the active sandbox", async (context) => {
+test("session shutdown awaits the selected sandbox stop", async (context) => {
   const fake = await createFakeGuardian();
-  context.after(() => rm(fake.directory, { force: true, recursive: true }));
+  context.after(() => cleanupFakeGuardian(fake));
+  await mkdir(join(fake.directory, ".pi"));
+  await writeFile(join(fake.directory, ".pi", "guardian.json"), JSON.stringify({
+    binary: fake.binary,
+    image: "demo-image",
+    globalArgs: [],
+    createArgs: [],
+    cleanup: "keep",
+    allow_no_sandbox: false,
+  }));
+
+  type EventHandler = (event: unknown, ctx: ExtensionContext) => unknown;
+  const handlers = new Map<string, EventHandler>();
+  const pi = {
+    registerTool: () => {},
+    registerCommand: () => {},
+    on: (event: string, handler: EventHandler) => handlers.set(event, handler),
+    getActiveTools: () => ["bash", "read", "write", "edit"],
+    setActiveTools: () => {},
+  } as unknown as ExtensionAPI;
+  guardianExtension(pi);
+
+  const ctx = {
+    cwd: fake.directory,
+    ui: {
+      theme: { fg: (_color: string, text: string) => text },
+      setStatus: () => {},
+      notify: () => {},
+    },
+    sessionManager: {
+      getBranch: () => [{
+        type: "custom",
+        customType: SANDBOX_ENTRY,
+        data: { piSessionId: "pi-session", sandboxId: SANDBOX_ID },
+      }],
+      getSessionId: () => "pi-session",
+    },
+  } as unknown as ExtensionContext;
+
+  await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
+  await waitForEvent(fake.directory, `start:${SANDBOX_ID}`);
+  await writeFile(join(fake.directory, "block-stop"), "");
+
+  let settled = false;
+  const shutdown = Promise.resolve(
+    handlers.get("session_shutdown")?.({ type: "session_shutdown" }, ctx),
+  ).then(() => {
+    settled = true;
+  });
+  await waitForEvent(fake.directory, `stop-begin:${SANDBOX_ID}`);
+  assert.equal(settled, false);
+
+  await rm(join(fake.directory, "block-stop"));
+  await shutdown;
+  assert.equal(settled, true);
+  await waitForEvent(fake.directory, `stop-end:${SANDBOX_ID}`);
+});
+
+test("selection awaits the previous stop before starting the next sandbox", async (context) => {
+  const fake = await createFakeGuardian();
+  context.after(() => cleanupFakeGuardian(fake));
   const client = createTestClient(fake);
   const router = new Router();
-  const direct = new DirectSandbox();
+  const previous = new GuardianSandbox(client, SANDBOX_ID);
+  const next = new GuardianSandbox(client, RESUMED_SANDBOX_ID);
+  const { pi } = activeToolApi();
+  const ctx = {
+    ui: { confirm: async () => false },
+    sessionManager: { getSessionId: () => "pi-session" },
+  } as unknown as ExtensionContext;
   const config = {
     binary: fake.binary,
     image: "demo-image",
     globalArgs: [],
     createArgs: [],
     logFile: join(fake.directory, "guardian.jsonl"),
-    cleanup: "ask" as const,
+    cleanup: "keep" as const,
     allowNoSandbox: true,
   };
-  const branch: unknown[] = [];
-  const entries: unknown[] = [];
-  let activeTools = ["bash", "read", "write", "edit", "ls", "find", "grep"];
-  const pi = {
-    appendEntry: (type: string, data: unknown) => {
-      entries.push(data);
-      branch.push({ type: "custom", customType: type, data });
-    },
-    getActiveTools: () => activeTools,
-    setActiveTools: (tools: string[]) => {
-      activeTools = tools;
-    },
-  } as unknown as ExtensionAPI;
-  let choice: string | undefined = "Create new";
-  const editorInputs = ["demo-image", ""];
-  let cleanupPrompts = 0;
-  let removePrevious = false;
-  let idle = true;
+
+  previous.start();
+  router.select(previous, pi);
+  await waitForEvent(fake.directory, `start:${SANDBOX_ID}`);
+  await writeFile(join(fake.directory, "block-stop"), "");
+
+  const transition = changeSandbox(pi, config, client, router, next, ctx);
+  await waitForEvent(fake.directory, `stop-begin:${SANDBOX_ID}`);
+  assert.equal((await readEvents(fake.directory)).includes(`start:${RESUMED_SANDBOX_ID}`), false);
+
+  await rm(join(fake.directory, "block-stop"));
+  await transition;
+  await waitForEvent(fake.directory, `start:${RESUMED_SANDBOX_ID}`);
+  const events = await readEvents(fake.directory);
+  assert.ok(events.indexOf(`stop-end:${SANDBOX_ID}`) < events.indexOf(`start:${RESUMED_SANDBOX_ID}`));
+  await next.stop();
+});
+
+test("a failed stop warns and does not prevent selecting the next sandbox", async (context) => {
+  const fake = await createFakeGuardian();
+  context.after(() => cleanupFakeGuardian(fake));
+  const client = createTestClient(fake);
+  const router = new Router();
+  const previous = new GuardianSandbox(client, SANDBOX_ID);
+  const next = new GuardianSandbox(client, RESUMED_SANDBOX_ID);
+  const { pi } = activeToolApi();
+  const warnings: string[] = [];
   const ctx = {
-    cwd: "/project",
-    hasUI: true,
     ui: {
-      select: async () => choice,
-      editor: async () => editorInputs.shift(),
-      custom: async () => RESUMED_SANDBOX_ID,
-      confirm: async () => {
-        cleanupPrompts++;
-        assert.equal(typeof router.selectedId, "string");
-        return removePrevious;
+      confirm: async () => false,
+      notify: (message: string, level: string) => {
+        if (level === "warning") warnings.push(message);
       },
-      notify: () => {},
     },
-    isIdle: () => idle,
-    sessionManager: {
-      getBranch: () => branch,
-      getSessionId: () => "pi-session",
-    },
+    sessionManager: { getSessionId: () => "pi-session" },
   } as unknown as ExtensionContext;
-  const chooseAndChange = async (): Promise<void> => {
-    const next = await chooseSandbox(config, client, direct, ctx);
-    if (next) await changeSandbox(pi, config, client, router, next, ctx);
+  const config = {
+    binary: fake.binary,
+    image: "demo-image",
+    globalArgs: [],
+    createArgs: [],
+    logFile: join(fake.directory, "guardian.jsonl"),
+    cleanup: "keep" as const,
+    allowNoSandbox: true,
   };
 
-  await chooseAndChange();
-  const firstSandbox = router.selectedId;
-  assert.equal(firstSandbox, SANDBOX_ID);
+  previous.start();
+  router.select(previous, pi);
+  await waitForEvent(fake.directory, `start:${SANDBOX_ID}`);
+  await writeFile(join(fake.directory, "fail-stop"), "");
 
-  idle = false;
-  choice = "No sandbox";
-  await assert.rejects(chooseAndChange(), /while Pi is running/);
-  assert.equal(router.selectedId, firstSandbox);
-  assert.equal(entries.length, 1);
-  idle = true;
-
-  choice = undefined;
-  await chooseAndChange();
-  assert.equal(router.selectedId, firstSandbox);
-  assert.equal(cleanupPrompts, 0);
-
-  choice = "Resume";
-  removePrevious = true;
-  await writeFile(join(fake.directory, "fail-remove"), "");
-  await assert.rejects(chooseAndChange(), /remove sandbox/);
-  assert.equal(router.selectedId, firstSandbox);
-  assert.equal(entries.length, 1);
-  await rm(join(fake.directory, "fail-remove"));
-
-  removePrevious = false;
-  await chooseAndChange();
+  await changeSandbox(pi, config, client, router, next, ctx);
+  await waitForEvent(fake.directory, `start:${RESUMED_SANDBOX_ID}`);
   assert.equal(router.selectedId, RESUMED_SANDBOX_ID);
-  assert.equal(cleanupPrompts, 2);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /Stop Guardian sandbox.*stop failed/);
 
-  choice = "No sandbox";
-  await chooseAndChange();
-  assert.equal(router.selectedId, null);
-  assert.equal(cleanupPrompts, 3);
-  assert.equal(entries.length, 3);
-  assert.deepEqual(entries[0], { piSessionId: "pi-session", sandboxId: SANDBOX_ID });
-  assert.deepEqual(entries[2], { piSessionId: "pi-session", sandboxId: null });
+  await rm(join(fake.directory, "fail-stop"));
+  await next.stop();
 });
 
 test("sandbox state is restored only for the current Pi session", () => {
@@ -341,7 +435,7 @@ test("GuardianClient creates, checks, and attaches to a sandbox", async (context
 
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
-  const result = await client.start(SANDBOX_ID, {
+  const result = await client.exec(SANDBOX_ID, {
     input: Buffer.from("printf stdout\nprintf stderr >&2\nexit 7\n"),
     onStdout: (data) => stdout.push(data),
     onStderr: (data) => stderr.push(data),
@@ -353,8 +447,12 @@ test("GuardianClient creates, checks, and attaches to a sandbox", async (context
 
 test("GuardianSandbox implements read, write, edit, and bash", async (context) => {
   const fake = await createFakeGuardian();
-  context.after(() => rm(fake.directory, { force: true, recursive: true }));
   const sandbox = new GuardianSandbox(createTestClient(fake), SANDBOX_ID);
+  sandbox.start();
+  context.after(async () => {
+    await sandbox.stop();
+    await rm(fake.directory, { force: true, recursive: true });
+  });
   const ctx = toolContext(fake.directory);
   const file = join(fake.directory, "nested", "note.txt");
 
@@ -396,24 +494,23 @@ test("GuardianSandbox implements read, write, edit, and bash", async (context) =
   assert.match(bashResult.content[0]?.type === "text" ? bashResult.content[0].text : "", new RegExp(fake.directory));
 });
 
-test("GuardianClient aborts and times out attached executions", async (context) => {
+test("cancelling one execution does not affect another", async (context) => {
   const fake = await createFakeGuardian();
   context.after(() => rm(fake.directory, { force: true, recursive: true }));
   const client = createTestClient(fake);
 
   const controller = new AbortController();
-  const execution = client.start(SANDBOX_ID, {
+  const cancelled = client.exec(SANDBOX_ID, {
     input: Buffer.from("trap 'exit 0' TERM\nwhile :; do :; done\n"),
     signal: controller.signal,
   });
-  setTimeout(() => controller.abort(), 20);
-  await assert.rejects(execution, /aborted/);
+  const sibling = client.exec(SANDBOX_ID, {
+    input: Buffer.from("sleep 0.1\nprintf sibling\n"),
+  });
 
-  await assert.rejects(
-    client.start(SANDBOX_ID, {
-      input: Buffer.from("trap 'exit 0' TERM\nwhile :; do :; done\n"),
-      timeoutMs: 20,
-    }),
-    /timeout:20/,
-  );
+  setTimeout(() => controller.abort(), 20);
+  await assert.rejects(cancelled, /aborted/);
+  const result = await sibling;
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.toString(), "sibling");
 });

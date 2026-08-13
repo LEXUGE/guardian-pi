@@ -21,6 +21,8 @@ export interface ToolBackend {
 
 export interface Sandbox extends ToolBackend {
   readonly id: string | null;
+  start(): void;
+  stop(): Promise<Error | undefined>;
   activateHook?(pi: ExtensionAPI): void;
   deactivateHook?(pi: ExtensionAPI): void;
 }
@@ -34,25 +36,21 @@ export function registerTools(pi: ExtensionAPI, backend: ToolBackend): void {
   pi.registerTool(defineTool({
     ...bash,
     label: "bash (Guardian)",
-    executionMode: "sequential",
     execute: (...args) => backend.bash(...args),
   }));
   pi.registerTool(defineTool({
     ...read,
     label: "read (Guardian)",
-    executionMode: "sequential",
     execute: (...args) => backend.read(...args),
   }));
   pi.registerTool(defineTool({
     ...write,
     label: "write (Guardian)",
-    executionMode: "sequential",
     execute: (...args) => backend.write(...args),
   }));
   pi.registerTool(defineTool({
     ...edit,
     label: "edit (Guardian)",
-    executionMode: "sequential",
     execute: (...args) => backend.edit(...args),
   }));
 }
