@@ -629,6 +629,21 @@ test("GuardianSandbox implements read, write, edit, and bash", async (context) =
   assert.match(bashResult.content[0]?.type === "text" ? bashResult.content[0].text : "", new RegExp(fake.directory));
 });
 
+test("bash timeout is reported in seconds", async (context) => {
+  const fake = await createFakeGuardian();
+  const sandbox = new GuardianSandbox(createTestClient(fake), SANDBOX_ID);
+  await sandbox.start();
+  context.after(async () => {
+    await sandbox.stop();
+    await rm(fake.directory, { force: true, recursive: true });
+  });
+
+  await assert.rejects(
+    sandbox.bash("bash", { command: "sleep 1", timeout: 0.02 }, undefined, undefined, toolContext(fake.directory)),
+    /Command timed out after 0\.02 seconds/,
+  );
+});
+
 test("cancelling one execution does not affect another", async (context) => {
   const fake = await createFakeGuardian();
   context.after(() => rm(fake.directory, { force: true, recursive: true }));

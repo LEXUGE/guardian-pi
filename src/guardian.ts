@@ -152,7 +152,7 @@ export class GuardianClient {
         if (options.signal?.aborted) {
           finish(() => reject(new Error("aborted")));
         } else if (timedOut) {
-          finish(() => reject(new Error(`timeout:${options.timeoutMs}`)));
+          finish(() => reject(new Error(`timeout:${options.timeoutMs! / 1000}`)));
         } else {
           finish(() => resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), exitCode }));
         }
