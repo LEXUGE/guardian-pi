@@ -20,6 +20,7 @@ export default function guardianExtension(pi: ExtensionAPI): void {
       binary: config.binary,
       logFile: config.logFile,
       globalArgs: config.globalArgs,
+      startArgs: config.startArgs,
     });
     direct = new DirectSandbox();
   };

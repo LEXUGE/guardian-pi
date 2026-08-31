@@ -32,6 +32,7 @@ test("Guardian configuration is loaded from the project JSON file", async (conte
       cleanup: "remove",
       allow_no_sandbox: false,
       createArgs: ["--mount", "type=bind,source=$(pwd),destination=/workspace"],
+      startArgs: ["--start-option", "project-value"],
     }),
   );
   const config = getConfig(directory);
@@ -49,6 +50,7 @@ test("Guardian configuration is loaded from the project JSON file", async (conte
   assert.equal(config.cleanup, "remove");
   assert.equal(config.allowNoSandbox, false);
   assert.deepEqual(config.createArgs, ["--mount", `type=bind,source=${directory},destination=/workspace`]);
+  assert.deepEqual(config.startArgs, ["--start-option", "project-value"]);
 });
 
 async function createFakeGuardian(): Promise<{ directory: string; binary: string }> {
@@ -132,6 +134,7 @@ function createTestClient(fake: { directory: string; binary: string }): Guardian
     binary: fake.binary,
     logFile: join(fake.directory, "guardian.jsonl"),
     globalArgs: ["--podman", "podman", "--runtime", "runsc", "--connect-timeout", "10s", "--stop-timeout", "5s"],
+    startArgs: [],
   });
 }
 
@@ -229,6 +232,7 @@ test("Guardian extension restores host-only tools when leaving a sandbox branch"
     image: "demo-image",
     globalArgs: [],
     createArgs: [],
+    startArgs: [],
     cleanup: "keep",
     allow_no_sandbox: true,
   }));
@@ -286,6 +290,7 @@ test("session shutdown awaits the selected sandbox stop", async (context) => {
     image: "demo-image",
     globalArgs: [],
     createArgs: [],
+    startArgs: [],
     cleanup: "keep",
     allow_no_sandbox: false,
   }));
@@ -386,6 +391,7 @@ test("changing away from a borrowed sandbox does not remove its running owner", 
     image: "demo-image",
     globalArgs: [],
     createArgs: [],
+    startArgs: [],
     logFile: join(fake.directory, "guardian.jsonl"),
     cleanup: "remove" as const,
     allowNoSandbox: true,
@@ -438,6 +444,7 @@ test("selection awaits the previous stop before starting the next sandbox", asyn
     image: "demo-image",
     globalArgs: [],
     createArgs: [],
+    startArgs: [],
     logFile: join(fake.directory, "guardian.jsonl"),
     cleanup: "keep" as const,
     allowNoSandbox: true,
@@ -477,6 +484,7 @@ test("reselecting the same sandbox stops and starts a fresh owner", async (conte
     image: "demo-image",
     globalArgs: [],
     createArgs: [],
+    startArgs: [],
     logFile: join(fake.directory, "guardian.jsonl"),
     cleanup: "remove" as const,
     allowNoSandbox: true,
@@ -516,6 +524,7 @@ test("a failed stop warns and does not prevent selecting the next sandbox", asyn
     image: "demo-image",
     globalArgs: [],
     createArgs: [],
+    startArgs: [],
     logFile: join(fake.directory, "guardian.jsonl"),
     cleanup: "keep" as const,
     allowNoSandbox: true,

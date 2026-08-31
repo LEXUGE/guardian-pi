@@ -1,0 +1,28 @@
+[domains]
+allow = [
+  # npm metadata, audit requests, and package tarballs
+  { target = "registry.npmjs.org", ports = [443] },
+
+  # Repository access and the endpoints used by Nix's GitHub fetcher
+  { target = "github.com", ports = [443] },
+  { target = "api.github.com", ports = [443] },
+  { target = "codeload.github.com", ports = [443] },
+  { target = "raw.githubusercontent.com", ports = [443] },
+
+  # Nix registry, release redirects, and binary substitutes
+  { target = "channels.nixos.org", ports = [443] },
+  { target = "releases.nixos.org", ports = [443] },
+  { target = "cache.nixos.org", ports = [443] },
+
+  # Cargo dependency metadata and crate downloads
+  { target = "index.crates.io", ports = [443] },
+  { target = "static.crates.io", ports = [443] },
+
+  # The image's configured Debian package and security repositories use HTTP.
+  { target = "deb.debian.org", ports = [80] },
+]
+
+# No direct IP access available due to empty allowlist
+[cidrs]
+# Keep loopback, private, link-local, and other special-use networks inaccessible.
+deny_protected = true

@@ -8,6 +8,10 @@
     "--mount",
     "type=bind,source=$(pwd)/.git,destination=/workspace/.git,ro=true"
   ],
+  "startArgs": [
+    "--net-policy",
+    ".pi/net-policy.toml"
+  ],
   "cleanup": "ask",
   "allow_no_sandbox": false
 }

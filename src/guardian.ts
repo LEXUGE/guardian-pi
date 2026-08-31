@@ -30,6 +30,7 @@ export interface GuardianClientConfig {
   binary: string;
   logFile: string;
   globalArgs: string[];
+  startArgs: string[];
 }
 
 function validateCreateArgs(args: string[]): void {
@@ -77,6 +78,7 @@ export class GuardianClient {
       this.config.logFile,
       ...this.config.globalArgs,
       "start",
+      ...this.config.startArgs,
       sandboxId,
     ], { stdio: ["ignore", "ignore", "pipe"] });
     const completed = new Promise<ExecutionResult>((resolve, reject) => {

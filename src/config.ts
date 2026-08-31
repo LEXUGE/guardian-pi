@@ -10,6 +10,7 @@ export interface GuardianConfig {
   image: string;
   globalArgs: string[];
   createArgs: string[];
+  startArgs: string[];
   logFile: string;
   cleanup: CleanupPolicy;
   allowNoSandbox: boolean;
@@ -53,7 +54,7 @@ function allowNoSandboxConfig(config: GuardianFileConfig): boolean {
   return value;
 }
 
-function argsConfig(config: GuardianFileConfig, name: "globalArgs" | "createArgs"): string[] {
+function argsConfig(config: GuardianFileConfig, name: "globalArgs" | "createArgs" | "startArgs"): string[] {
   const value = config[name];
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
     throw new Error(`Guardian configuration field ${name} is required and must be an array of strings`);
@@ -71,6 +72,7 @@ export function getConfig(cwd: string): GuardianConfig {
     image: optionalString(fileConfig, "image", ""),
     globalArgs: argsConfig(fileConfig, "globalArgs"),
     createArgs: argsConfig(fileConfig, "createArgs").map((argument) => argument.replaceAll("$(pwd)", cwd)),
+    startArgs: argsConfig(fileConfig, "startArgs"),
     logFile: optionalString(fileConfig, "logFile", join(tmpdir(), `guardian-pi-${process.pid}.jsonl`)),
     cleanup: cleanupConfig(fileConfig),
     allowNoSandbox: allowNoSandboxConfig(fileConfig),
