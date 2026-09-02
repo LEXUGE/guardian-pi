@@ -32,7 +32,7 @@ test("Guardian configuration is loaded from the project JSON file", async (conte
       cleanup: "remove",
       allow_no_sandbox: false,
       createArgs: ["--mount", "type=bind,source=$(pwd),destination=/workspace"],
-      startArgs: ["--start-option", "project-value"],
+      startArgs: ["--start-option", "project-value", "--project-dir", "$(pwd)"],
     }),
   );
   const config = getConfig(directory);
@@ -50,7 +50,7 @@ test("Guardian configuration is loaded from the project JSON file", async (conte
   assert.equal(config.cleanup, "remove");
   assert.equal(config.allowNoSandbox, false);
   assert.deepEqual(config.createArgs, ["--mount", `type=bind,source=${directory},destination=/workspace`]);
-  assert.deepEqual(config.startArgs, ["--start-option", "project-value"]);
+  assert.deepEqual(config.startArgs, ["--start-option", "project-value", "--project-dir", directory]);
 });
 
 async function createFakeGuardian(): Promise<{ directory: string; binary: string }> {

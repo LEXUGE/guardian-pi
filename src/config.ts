@@ -72,7 +72,7 @@ export function getConfig(cwd: string): GuardianConfig {
     image: optionalString(fileConfig, "image", ""),
     globalArgs: argsConfig(fileConfig, "globalArgs"),
     createArgs: argsConfig(fileConfig, "createArgs").map((argument) => argument.replaceAll("$(pwd)", cwd)),
-    startArgs: argsConfig(fileConfig, "startArgs"),
+    startArgs: argsConfig(fileConfig, "startArgs").map((argument) => argument.replaceAll("$(pwd)", cwd)),
     logFile: optionalString(fileConfig, "logFile", join(tmpdir(), `guardian-pi-${process.pid}.jsonl`)),
     cleanup: cleanupConfig(fileConfig),
     allowNoSandbox: allowNoSandboxConfig(fileConfig),
