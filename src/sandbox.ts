@@ -6,9 +6,13 @@ import type {
   WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import {
+  createBashTool,
   createBashToolDefinition,
+  createEditTool,
   createEditToolDefinition,
+  createReadTool,
   createReadToolDefinition,
+  createWriteTool,
   createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type {
@@ -25,7 +29,7 @@ import {
   type GuardianOwner,
 } from "./guardian.ts";
 
-const GUARDIAN_CWD = "/workspace";
+export const GUARDIAN_CWD = "/workspace";
 const HOST_ONLY_TOOLS = new Set(["ls", "find", "grep"]);
 const START_POLL_INTERVAL_MS = 25;
 
@@ -180,28 +184,28 @@ export class GuardianSandbox implements Sandbox {
     this.suspendedTools.clear();
   }
 
-  bash: BashExecutor = async (id, params, signal, onUpdate, ctx) => {
-    return createBashToolDefinition(GUARDIAN_CWD, {
+  bash: BashExecutor = async (id, params, signal, onUpdate, _ctx) => {
+    return createBashTool(GUARDIAN_CWD, {
       operations: this.createBashOperations(),
-    }).execute(id, params, signal, onUpdate, ctx);
+    }).execute(id, params, signal, onUpdate);
   };
 
-  read: ReadExecutor = async (id, params, signal, onUpdate, ctx) => {
-    return createReadToolDefinition(GUARDIAN_CWD, {
+  read: ReadExecutor = async (id, params, signal, onUpdate, _ctx) => {
+    return createReadTool(GUARDIAN_CWD, {
       operations: this.createReadOperations(signal),
-    }).execute(id, params, signal, onUpdate, ctx);
+    }).execute(id, params, signal, onUpdate);
   };
 
-  write: WriteExecutor = async (id, params, signal, onUpdate, ctx) => {
-    return createWriteToolDefinition(GUARDIAN_CWD, {
+  write: WriteExecutor = async (id, params, signal, onUpdate, _ctx) => {
+    return createWriteTool(GUARDIAN_CWD, {
       operations: this.createWriteOperations(signal),
-    }).execute(id, params, signal, onUpdate, ctx);
+    }).execute(id, params, signal, onUpdate);
   };
 
-  edit: EditExecutor = async (id, params, signal, onUpdate, ctx) => {
-    return createEditToolDefinition(GUARDIAN_CWD, {
+  edit: EditExecutor = async (id, params, signal, onUpdate, _ctx) => {
+    return createEditTool(GUARDIAN_CWD, {
       operations: this.createEditOperations(signal),
-    }).execute(id, params, signal, onUpdate, ctx);
+    }).execute(id, params, signal, onUpdate);
   };
 
   private async execute(

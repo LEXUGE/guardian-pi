@@ -223,7 +223,7 @@ test("Router delegates to the selected sandbox and runs its hooks", async (conte
   assert.deepEqual(active(), ["bash", "read", "write", "edit", "ls", "find", "grep"]);
 });
 
-test("Guardian extension restores host-only tools when leaving a sandbox branch", async (context) => {
+test("Guardian extension updates tools and system prompt with sandbox selection", async (context) => {
   const fake = await createFakeGuardian();
   context.after(() => cleanupFakeGuardian(fake));
   await mkdir(join(fake.directory, ".pi"));
@@ -272,6 +272,15 @@ test("Guardian extension restores host-only tools when leaving a sandbox branch"
   await handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, ctx);
   assert.deepEqual(activeTools, ["bash", "read", "write", "edit"]);
 
+  const sandboxPrompt = await handlers.get("before_agent_start")?.({
+    type: "before_agent_start",
+    systemPrompt: `System prompt\nCurrent working directory: ${fake.directory}`,
+  }, ctx) as { systemPrompt: string } | undefined;
+  assert.equal(
+    sandboxPrompt?.systemPrompt,
+    `System prompt\nCurrent working directory: /workspace (Guardian sandbox; host workspace mounted from ${fake.directory})`,
+  );
+
   branch = [...branch, {
     type: "custom",
     customType: SANDBOX_ENTRY,
@@ -279,6 +288,12 @@ test("Guardian extension restores host-only tools when leaving a sandbox branch"
   }];
   await handlers.get("session_tree")?.({ type: "session_tree" }, ctx);
   assert.deepEqual(activeTools, ["bash", "read", "write", "edit", "ls", "find", "grep"]);
+
+  const directPrompt = await handlers.get("before_agent_start")?.({
+    type: "before_agent_start",
+    systemPrompt: `System prompt\nCurrent working directory: ${fake.directory}`,
+  }, ctx);
+  assert.equal(directPrompt, undefined);
 });
 
 test("session shutdown awaits the selected sandbox stop", async (context) => {
@@ -633,9 +648,9 @@ test("GuardianSandbox implements read, write, edit, and bash", async (context) =
   );
 
   const bashResult = await sandbox.bash("bash", {
-    command: `cd '${fake.directory}' && pwd`,
+    command: "pwd",
   }, undefined, undefined, ctx);
-  assert.match(bashResult.content[0]?.type === "text" ? bashResult.content[0].text : "", new RegExp(fake.directory));
+  assert.equal(bashResult.content[0]?.type === "text" ? bashResult.content[0].text.trim() : "", "/workspace");
 });
 
 test("bash timeout is reported in seconds", async (context) => {

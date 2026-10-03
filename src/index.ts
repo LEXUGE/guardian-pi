@@ -3,7 +3,7 @@ import { registerTools, type Sandbox } from "./backend.ts";
 import { getConfig, type GuardianConfig } from "./config.ts";
 import { GuardianClient } from "./guardian.ts";
 import { Router } from "./router.ts";
-import { DirectSandbox, GuardianSandbox } from "./sandbox.ts";
+import { DirectSandbox, GUARDIAN_CWD, GuardianSandbox } from "./sandbox.ts";
 import { chooseSandbox } from "./sandbox-command.ts";
 import { findSandboxEntry, SANDBOX_ENTRY, type SandboxEntry } from "./sandbox-state.ts";
 
@@ -81,6 +81,10 @@ export default function guardianExtension(pi: ExtensionAPI): void {
       notifyError(ctx, error);
     }
   });
+  pi.on("before_agent_start", (event, ctx) => {
+    if (typeof router.selectedId !== "string") return;
+    return { systemPrompt: rewriteSystemPromptForSandbox(event.systemPrompt, ctx.cwd) };
+  });
   pi.on("session_shutdown", async (_event, ctx) => {
     const previous = router.selected;
     if (!previous) return;
@@ -130,6 +134,16 @@ export async function changeSandbox(
     sandboxId: next.id,
   });
   router.select(next, pi);
+}
+
+function rewriteSystemPromptForSandbox(systemPrompt: string, hostCwd: string): string {
+  const normalizedHostCwd = hostCwd.replaceAll("\\", "/");
+  const hostLine = `Current working directory: ${normalizedHostCwd}`;
+  const sandboxLine =
+    `Current working directory: ${GUARDIAN_CWD} (Guardian sandbox; host workspace mounted from ${normalizedHostCwd})`;
+  return systemPrompt.includes(hostLine)
+    ? systemPrompt.replace(hostLine, sandboxLine)
+    : `${systemPrompt}\n\n${sandboxLine}`;
 }
 
 function setStatus(router: Router, ctx: ExtensionContext): void {
