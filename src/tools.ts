@@ -1,4 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+  createBashToolDefinition,
+  createEditToolDefinition,
+  createReadToolDefinition,
+  createWriteToolDefinition,
+  defineTool,
+} from "@earendil-works/pi-coding-agent";
 import type {
   BashExecutor,
   EditExecutor,
@@ -6,7 +13,7 @@ import type {
   Sandbox,
   ToolBackend,
   WriteExecutor,
-} from "./backend.ts";
+} from "./backends.ts";
 
 export class Router implements ToolBackend {
   private current?: Sandbox;
@@ -34,4 +41,32 @@ export class Router implements ToolBackend {
     if (!this.current) throw new Error("Guardian: no sandbox is selected");
     return this.current;
   }
+}
+
+export function registerTools(pi: ExtensionAPI, backend: ToolBackend): void {
+  const bash = createBashToolDefinition("/");
+  const read = createReadToolDefinition("/");
+  const write = createWriteToolDefinition("/");
+  const edit = createEditToolDefinition("/");
+
+  pi.registerTool(defineTool({
+    ...bash,
+    label: "bash (Guardian)",
+    execute: (...args) => backend.bash(...args),
+  }));
+  pi.registerTool(defineTool({
+    ...read,
+    label: "read (Guardian)",
+    execute: (...args) => backend.read(...args),
+  }));
+  pi.registerTool(defineTool({
+    ...write,
+    label: "write (Guardian)",
+    execute: (...args) => backend.write(...args),
+  }));
+  pi.registerTool(defineTool({
+    ...edit,
+    label: "edit (Guardian)",
+    execute: (...args) => backend.edit(...args),
+  }));
 }

@@ -1,14 +1,15 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { homedir } from "node:os";
 
 export interface GuardianContainer {
   Names: string[];
   Image: string;
   Id: string;
-  Labels: Record<string, string>;
 }
 
 export interface ExecutionOptions {
   input?: Buffer;
+  cwd?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   onStdout?: (data: Buffer) => void;
@@ -52,7 +53,7 @@ export class GuardianClient {
     const result = await this.runChecked(args, "create sandbox", signal);
 
     const id = result.stdout.toString("utf8").trim();
-    if (!id) throw new Error("Guardian create returned no sandbox UUID");
+    if (!id) throw new Error("Guardian create returned no sandbox ID");
     return id;
   }
 
@@ -100,8 +101,10 @@ export class GuardianClient {
     return { child, completed };
   }
 
-  async exec(sandboxId: string, options: ExecutionOptions): Promise<ExecutionResult> {
-    return this.run(["exec", sandboxId, "/bin/sh", "-s"], options);
+  async exec(sandboxId: string, command: string[], options: ExecutionOptions = {}): Promise<ExecutionResult> {
+    const args = ["exec", sandboxId, "--env", `HOME=${homedir()}`];
+    if (options.cwd !== undefined) args.push("--workdir", options.cwd);
+    return this.run([...args, ...command], options);
   }
 
   async remove(sandboxId: string, signal?: AbortSignal): Promise<void> {
@@ -141,14 +144,8 @@ export class GuardianClient {
         child.kill("SIGTERM");
       };
 
-      child.stdout.on("data", (data: Buffer) => {
-        stdout.push(data);
-        options.onStdout?.(data);
-      });
-      child.stderr.on("data", (data: Buffer) => {
-        stderr.push(data);
-        options.onStderr?.(data);
-      });
+      child.stdout.on("data", options.onStdout ?? ((data: Buffer) => stdout.push(data)));
+      child.stderr.on("data", options.onStderr ?? ((data: Buffer) => stderr.push(data)));
       child.once("error", (error) => finish(() => reject(error)));
       child.once("close", (exitCode) => {
         if (options.signal?.aborted) {

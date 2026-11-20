@@ -6,40 +6,35 @@ import type {
   WriteOperations,
 } from "@earendil-works/pi-coding-agent";
 import {
-  createBashTool,
   createBashToolDefinition,
-  createEditTool,
   createEditToolDefinition,
-  createReadTool,
   createReadToolDefinition,
-  createWriteTool,
   createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type {
-  BashExecutor,
-  EditExecutor,
-  ReadExecutor,
-  Sandbox,
-  WriteExecutor,
-} from "./backend.ts";
-import {
-  GuardianClient,
-  type ExecutionOptions,
-  type ExecutionResult,
-  type GuardianOwner,
-} from "./guardian.ts";
+import type { GuardianClient, ExecutionResult, GuardianOwner } from "./guardian.ts";
 
-export const GUARDIAN_CWD = "/workspace";
+export type BashExecutor = ReturnType<typeof createBashToolDefinition>["execute"];
+export type ReadExecutor = ReturnType<typeof createReadToolDefinition>["execute"];
+export type WriteExecutor = ReturnType<typeof createWriteToolDefinition>["execute"];
+export type EditExecutor = ReturnType<typeof createEditToolDefinition>["execute"];
+
+export interface ToolBackend {
+  bash: BashExecutor;
+  read: ReadExecutor;
+  write: WriteExecutor;
+  edit: EditExecutor;
+}
+
+export interface Sandbox extends ToolBackend {
+  readonly id: string | null;
+  start(): Promise<Error | undefined>;
+  stop(): Promise<Error | undefined>;
+  activateHook?(pi: ExtensionAPI): void;
+  deactivateHook?(pi: ExtensionAPI): void;
+}
+
 const HOST_ONLY_TOOLS = new Set(["ls", "find", "grep"]);
 const START_POLL_INTERVAL_MS = 25;
-
-function quoteShellArgument(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function buildShellCommand(command: string, args: string[]): string {
-  return [command, ...args.map(quoteShellArgument)].join(" ");
-}
 
 function failure(action: string, result: ExecutionResult): Error {
   const detail = result.stderr.toString("utf8").trim();
@@ -184,42 +179,32 @@ export class GuardianSandbox implements Sandbox {
     this.suspendedTools.clear();
   }
 
-  bash: BashExecutor = async (id, params, signal, onUpdate, _ctx) => {
-    return createBashTool(GUARDIAN_CWD, {
+  bash: BashExecutor = async (id, params, signal, onUpdate, ctx) => {
+    return createBashToolDefinition(ctx.cwd, {
       operations: this.createBashOperations(),
-    }).execute(id, params, signal, onUpdate);
+    }).execute(id, params, signal, onUpdate, ctx);
   };
 
-  read: ReadExecutor = async (id, params, signal, onUpdate, _ctx) => {
-    return createReadTool(GUARDIAN_CWD, {
+  read: ReadExecutor = async (id, params, signal, onUpdate, ctx) => {
+    return createReadToolDefinition(ctx.cwd, {
       operations: this.createReadOperations(signal),
-    }).execute(id, params, signal, onUpdate);
+    }).execute(id, params, signal, onUpdate, ctx);
   };
 
-  write: WriteExecutor = async (id, params, signal, onUpdate, _ctx) => {
-    return createWriteTool(GUARDIAN_CWD, {
+  write: WriteExecutor = async (id, params, signal, onUpdate, ctx) => {
+    return createWriteToolDefinition(ctx.cwd, {
       operations: this.createWriteOperations(signal),
-    }).execute(id, params, signal, onUpdate);
+    }).execute(id, params, signal, onUpdate, ctx);
   };
 
-  edit: EditExecutor = async (id, params, signal, onUpdate, _ctx) => {
-    return createEditTool(GUARDIAN_CWD, {
+  edit: EditExecutor = async (id, params, signal, onUpdate, ctx) => {
+    return createEditToolDefinition(ctx.cwd, {
       operations: this.createEditOperations(signal),
-    }).execute(id, params, signal, onUpdate);
+    }).execute(id, params, signal, onUpdate, ctx);
   };
 
-  private async execute(
-    script: string,
-    options?: Omit<ExecutionOptions, "input">,
-  ): Promise<ExecutionResult> {
-    return this.client.exec(this.id, {
-      input: Buffer.from(`${script}\n`),
-      ...options,
-    });
-  }
-
-  private async runFileScript(script: string, signal?: AbortSignal): Promise<ExecutionResult> {
-    const result = await this.execute(script, { signal });
+  private async runFile(command: string[], signal?: AbortSignal, input?: Buffer): Promise<ExecutionResult> {
+    const result = await this.client.exec(this.id, command, { signal, input });
     if (result.exitCode !== 0) throw failure("Guardian file operation", result);
     return result;
   }
@@ -227,7 +212,9 @@ export class GuardianSandbox implements Sandbox {
   private createBashOperations(): BashOperations {
     return {
       exec: async (command, cwd, { onData, signal, timeout }) => {
-        const result = await this.execute(`${buildShellCommand("cd", [cwd])} && ${command}`, {
+        const result = await this.client.exec(this.id, ["/bin/sh", "-s"], {
+          input: Buffer.from(`${command}\n`),
+          cwd,
           signal,
           timeoutMs: timeout === undefined ? undefined : timeout * 1000,
           onStdout: onData,
@@ -240,15 +227,9 @@ export class GuardianSandbox implements Sandbox {
 
   private createReadOperations(signal?: AbortSignal): ReadOperations {
     return {
-      readFile: async (path) => {
-        const result = await this.runFileScript(
-          `${buildShellCommand("base64", [])} < ${quoteShellArgument(path)}`,
-          signal,
-        );
-        return Buffer.from(result.stdout.toString("utf8").replaceAll(/\s/g, ""), "base64");
-      },
+      readFile: async (path) => (await this.runFile(["cat", "--", path], signal)).stdout,
       access: async (path) => {
-        await this.runFileScript(buildShellCommand("test", ["-r", path]), signal);
+        await this.runFile(["test", "-r", path], signal);
       },
     };
   }
@@ -256,12 +237,10 @@ export class GuardianSandbox implements Sandbox {
   private createWriteOperations(signal?: AbortSignal): WriteOperations {
     return {
       writeFile: async (path, content) => {
-        const data = Buffer.from(content, "utf8").toString("base64");
-        const decode = `${buildShellCommand("printf", ["%s", data])} | ${buildShellCommand("base64", ["-d"])}`;
-        await this.runFileScript(`${decode} > ${quoteShellArgument(path)}`, signal);
+        await this.runFile(["/bin/sh", "-c", 'cat > "$1"', "--", path], signal, Buffer.from(content, "utf8"));
       },
       mkdir: async (path) => {
-        await this.runFileScript(buildShellCommand("mkdir", ["-p", path]), signal);
+        await this.runFile(["mkdir", "-p", "--", path], signal);
       },
     };
   }
@@ -273,10 +252,7 @@ export class GuardianSandbox implements Sandbox {
       readFile: read.readFile,
       writeFile: write.writeFile,
       access: async (path) => {
-        await this.runFileScript(
-          `${buildShellCommand("test", ["-r", path])} && ${buildShellCommand("test", ["-w", path])}`,
-          signal,
-        );
+        await this.runFile(["/bin/sh", "-c", 'test -r "$1" && test -w "$1"', "--", path], signal);
       },
     };
   }

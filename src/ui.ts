@@ -1,11 +1,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Container, Input, SelectList, Text, type SelectItem } from "@earendil-works/pi-tui";
-import type { Sandbox } from "./backend.ts";
+import { fuzzyFilter, Input, SelectList, Text } from "@earendil-works/pi-tui";
+import { GuardianSandbox, type DirectSandbox, type Sandbox } from "./backends.ts";
 import type { GuardianConfig } from "./config.ts";
-import { GuardianClient, type GuardianContainer } from "./guardian.ts";
-import { DirectSandbox, GuardianSandbox } from "./sandbox.ts";
-
-const SANDBOX_ID_LABEL = "io.guardian.sandbox.id";
+import type { GuardianClient } from "./guardian.ts";
 
 export async function chooseSandbox(
   config: GuardianConfig,
@@ -51,86 +48,61 @@ async function selectExistingSandbox(
   client: GuardianClient,
   ctx: ExtensionContext,
 ): Promise<string | undefined> {
-  const containers = await client.list();
+  const containers = (await client.list()).filter((item) => item.Names[0]);
   if (containers.length === 0) {
     ctx.ui.notify("No Guardian sandboxes found", "warning");
     return undefined;
   }
 
+  const items = containers.map((item) => ({
+    value: item.Names[0],
+    label: `${item.Names[0]} · ${item.Image}`,
+  }));
+  const title = "Resume Guardian sandbox";
+  if (ctx.mode !== "tui") {
+    const selected = await ctx.ui.select(title, items.map((item) => item.label));
+    return items.find((item) => item.label === selected)?.value;
+  }
+
   return ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
-    const container = new Container();
-    const search = new Input();
-    const listContainer = new Container();
-    let selectList: SelectList;
-
-    container.addChild(new Text(theme.fg("accent", theme.bold("Resume Guardian sandbox"))));
-    container.addChild(new Text(theme.fg("muted", "Search by name, image, sandbox UUID, or container ID")));
-    container.addChild(search);
-    container.addChild(listContainer);
-    container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel")));
-
-    const rebuildList = (): void => {
-      const query = search.getValue().trim().toLowerCase();
-      const matches = containers.filter((item) => sandboxSearchText(item).includes(query));
-      const items: SelectItem[] = matches.map((item) => ({
-        value: item.Labels[SANDBOX_ID_LABEL] ?? "",
-        label: item.Names.join(", ") || item.Labels[SANDBOX_ID_LABEL] || item.Id,
-        description: `${item.Image} · ${item.Labels[SANDBOX_ID_LABEL] ?? "unknown UUID"}`,
-      })).filter((item) => item.value);
-
-      selectList = new SelectList(items, Math.min(Math.max(items.length, 1), 10), {
+    const heading = new Text(title, 0, 0);
+    const search = new Input({ placeholder: "Type to filter by image or ID" });
+    const buildList = () => {
+      const list = new SelectList(fuzzyFilter(items, search.getValue(), (item) => item.label), 10, {
         selectedPrefix: (text) => theme.fg("accent", text),
         selectedText: (text) => theme.fg("accent", text),
         description: (text) => theme.fg("muted", text),
         scrollInfo: (text) => theme.fg("dim", text),
-        noMatch: (text) => theme.fg("warning", text),
+        noMatch: () => theme.fg("warning", "No matching sandboxes"),
       });
-      selectList.onSelect = (item) => done(item.value);
-      selectList.onCancel = () => done(undefined);
-      listContainer.clear();
-      listContainer.addChild(selectList);
+      list.onSelect = (item) => done(item.value);
+      list.onCancel = () => done(undefined);
+      return list;
     };
-    rebuildList();
+    let list = buildList();
 
     return {
-      get focused() {
-        return search.focused;
-      },
-      set focused(value: boolean) {
-        search.focused = value;
-      },
-      render(width: number) {
-        return container.render(width);
-      },
-      invalidate() {
-        container.invalidate();
-      },
-      handleInput(data: string) {
-        if (keybindings.matches(data, "tui.select.cancel")) {
-          done(undefined);
-        } else if (
-          keybindings.matches(data, "tui.select.up") ||
-          keybindings.matches(data, "tui.select.down") ||
-          keybindings.matches(data, "tui.select.confirm")
-        ) {
-          selectList.handleInput(data);
+      capturesViewportInput: true,
+      get focused() { return search.focused; },
+      set focused(value: boolean) { search.focused = value; },
+      render: (width) => [...heading.render(width), ...search.render(width), "", ...list.render(width)],
+      invalidate: () => { heading.invalidate(); search.invalidate(); list.invalidate(); },
+      handleInput(data) {
+        const navigation = [
+          "tui.select.up", "tui.select.down", "tui.select.pageUp",
+          "tui.select.pageDown", "tui.select.confirm", "tui.select.cancel",
+        ] as const;
+        if (navigation.some((action) => keybindings.matches(data, action))) {
+          list.handleInput(data);
         } else {
+          const previous = search.getValue();
           search.handleInput(data);
-          rebuildList();
+          if (search.getValue() !== previous) list = buildList();
         }
         tui.requestRender();
       },
     };
-  });
-}
-
-function sandboxSearchText(container: GuardianContainer): string {
-  return [
-    ...container.Names,
-    container.Image,
-    container.Id,
-    ...Object.entries(container.Labels).flat(),
-  ].join(" ").toLowerCase();
+  }, { blocked: { kind: "question", message: title } });
 }
 
 function parseCreateArguments(input: string): string[] {

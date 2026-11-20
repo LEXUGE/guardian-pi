@@ -4,14 +4,16 @@
   "createArgs": [
     "--gvisor-overlay2=none",
     "--mount",
-    "type=bind,source=$(pwd),destination=/workspace",
+    "type=bind,source=$(pwd),destination=$(pwd)",
     "--mount",
-    "type=bind,source=$(pwd)/.git,destination=/workspace/.git,ro=true"
+    "type=bind,source=/home/ash/.pi,destination=/home/ash/.pi,ro=true",
+    "--mount",
+    "type=bind,source=$(pwd)/.git,destination=$(pwd)/.git,ro=true"
   ],
   "startArgs": [
     "--net-policy",
     ".pi/net-policy.toml"
   ],
-  "cleanup": "ask",
-  "allow_no_sandbox": false
+  "cleanup": "keep",
+  "allow_no_sandbox": true
 }
